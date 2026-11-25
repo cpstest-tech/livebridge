@@ -1,0 +1,53 @@
+.golive-button {
+  background: linear-gradient(135deg, #ff2d55, #fe2c55 40%, #e0103f);
+  color: white;
+  font-weight: 800;
+  font-size: 1.15em;
+  min-height: 52px;
+  min-width: 240px;
+  border-radius: 999px;
+}
+.golive-button:hover { background: linear-gradient(135deg, #ff4467, #ff3d63 40%, #ec1b4b); }
+.golive-button:disabled { background: alpha(currentColor, 0.1); color: alpha(currentColor, 0.5); }
+
+.live-pill {
+  background: #fe2c55;
+  color: white;
+  font-weight: 900;
+  letter-spacing: 2px;
+  padding: 4px 16px;
+  border-radius: 999px;
+  animation: livepulse 1.6s ease-in-out infinite;
+}
+@keyframes livepulse {
+  0%   { box-shadow: 0 0 0 0 alpha(#fe2c55, 0.6); }
+  70%  { box-shadow: 0 0 0 14px alpha(#fe2c55, 0); }
+  100% { box-shadow: 0 0 0 0 alpha(#fe2c55, 0); }
+}
+
+.live-timer {
+  font-size: 46px;
+  font-weight: 800;
+  font-feature-settings: "tnum";
+}
+
+.viewers-label { font-size: 1.1em; opacity: 0.8; }
+
+.status-ok { color: #2ec27e; }
+.status-warn { color: #e5a50a; }
+.status-bad { color: #e01b24; }
+
+.char-counter { font-feature-settings: "tnum"; opacity: 0.55; }
+.char-counter.full { color: #e5a50a; opacity: 1; }
+
+.hero-icon { -gtk-icon-size: 128px; }
+
+.end-button {
+  background: #e01b24;
+  color: white;
+  font-weight: 700;
+  min-height: 44px;
+  padding: 0 32px;
+}
+.end-button:hover { background: #f0303a; }
+.end-button:disabled { opacity: 0.6; }

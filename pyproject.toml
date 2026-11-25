@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "livebridge"
+version = "0.1.0"
+description = "Go LIVE on TikTok from Linux with OBS"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+# PyGObject, GTK 4 and libadwaita come from your distribution (see README).
+dependencies = []
+
+[project.scripts]
+livebridge = "livebridge.__main__:main"
+
+[tool.setuptools]
+packages = ["livebridge", "livebridge.gui"]
+
+[tool.setuptools.package-data]
+"livebridge.gui" = ["style.css"]

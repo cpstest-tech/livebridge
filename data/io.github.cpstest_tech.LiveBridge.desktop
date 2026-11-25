@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=LiveBridge
+GenericName=TikTok LIVE for Linux
+Comment=Go LIVE on TikTok from Linux with OBS
+Comment[it]=Vai in LIVE su TikTok da Linux con OBS
+Exec=livebridge %u
+Icon=io.github.cpstest_tech.LiveBridge
+Terminal=false
+Categories=AudioVideo;Video;Network;
+Keywords=tiktok;live;stream;obs;rtmp;streaming;
+MimeType=x-scheme-handler/live-studio-app;
+StartupNotify=true
+StartupWMClass=io.github.cpstest_tech.LiveBridge
