@@ -130,7 +130,7 @@ class TikTokClient:
             p["priority_region"] = self.state["region"]
         return p
 
-    def _request(self, method, url, params=None, data=None, cookies=True, timeout=20):
+    def _request(self, method, url, params=None, data=None, cookies=True, timeout=20, raw_body=False):
         q = self._params()
         q.update(params or {})
         url += ("&" if "?" in url else "?") + urllib.parse.urlencode(q)
@@ -164,6 +164,10 @@ class TikTokClient:
         if len(self.jar):
             self._save_cookies()
         logid = hdrs.get("x-tt-logid")
+        if raw_body:
+            if status != 200:
+                raise ApiError(f"HTTP {status} from {urllib.parse.urlsplit(url).netloc}", code=status, logid=logid)
+            return raw, hdrs, logid
         try:
             js = json.loads(raw.decode("utf-8", "replace")) if raw else {}
         except ValueError:
@@ -307,6 +311,18 @@ class TikTokClient:
             return int(n) if n is not None else None
         except (ApiError, ValueError, TypeError):
             return None
+
+    def fetch_chat(self, room_id, cursor="", internal_ext=""):
+        """Raw protobuf body of /webcast/im/fetch/ (decoded in chat.py)."""
+        if not self.logged_in:
+            raise NotLoggedIn("Not logged in")
+        host = self.state.get("webcast_host") or FALLBACK_WEBCAST
+        raw, _, _ = self._request("GET", f"https://{host}/webcast/im/fetch/", timeout=15, raw_body=True, params={
+            "room_id": room_id, "resp_content_type": "protobuf", "sup_ws_ds_opt": 1, "did_rule": 0,
+            "fetch_rule": 1, "cursor": cursor, "internal_ext": internal_ext,
+            # values LIVE Studio's IM SDK sends; without them the server returns no messages
+            "live_id": 12, "version_code": "300400", "identity": "anchor"})
+        return raw
 
     def end_live(self, room=None):
         room = room or self.state.get("room")

@@ -26,7 +26,7 @@
 }
 
 .live-timer {
-  font-size: 46px;
+  font-size: 30px;
   font-weight: 800;
   font-feature-settings: "tnum";
 }
@@ -51,3 +51,11 @@
 }
 .end-button:hover { background: #f0303a; }
 .end-button:disabled { opacity: 0.6; }
+
+.chat-card { min-height: 200px; }
+.chat-list { background: transparent; padding: 6px 0; }
+.chat-list > row { padding: 3px 12px; background: transparent; }
+.chat-line { font-size: 1.02em; }
+.chat-gift { color: #ffb02e; }
+.chat-event { color: #25c2d9; }
+.chat-join { opacity: 0.55; font-size: 0.92em; }

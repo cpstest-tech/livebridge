@@ -2,11 +2,13 @@ import threading
 import time
 import urllib.request
 
-from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
 from .. import APP_ID, obs
 from ..api import TITLE_MAX, URL_SCHEME, ApiError, NotLoggedIn, TikTokClient, split_rtmp
 from ..i18n import _, fmt_int
+from .. import tts
+from ..chat import ChatReader
 from ..session import LiveSession
 
 
@@ -43,6 +45,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_size_request(360, 560)
 
         self.client = TikTokClient()
+        self.speaker = tts.Speaker(rate=(self.client.state.get("tts") or {}).get("rate", 1.0))
         self.session = None
         self._obs_state = None
         self._obs_polling = False
@@ -72,6 +75,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_content(self.toasts)
 
         self.connect("close-request", self._on_close_request)
+        self.connect("destroy", lambda *_: self.speaker.close())
+        self._set_tts_toggle(self._tts_settings()["enabled"] and self.speaker.engine is not None)
         GLib.timeout_add_seconds(3, self._poll_obs)
 
         if self.client.logged_in:
@@ -452,23 +457,72 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ======================================================================== live
     def _build_live(self):
-        scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
-        clamp = Adw.Clamp(maximum_size=520, margin_start=12, margin_end=12)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, margin_top=28, margin_bottom=28)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        clamp = Adw.Clamp(maximum_size=560, margin_start=12, margin_end=12, vexpand=True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=14, margin_bottom=14)
 
-        pill = Gtk.Label(label=_("LIVE"), halign=Gtk.Align.CENTER)
+        # compact header: LIVE · timer ............ viewers · likes
+        head = Gtk.Box(spacing=12)
+        pill = Gtk.Label(label=_("LIVE"), valign=Gtk.Align.CENTER)
         pill.add_css_class("live-pill")
-        box.append(pill)
-        self.timer_label = Gtk.Label(label="00:00")
+        head.append(pill)
+        self.timer_label = Gtk.Label(label="00:00", valign=Gtk.Align.CENTER)
         self.timer_label.add_css_class("live-timer")
-        box.append(self.timer_label)
-        self.viewers_label = Gtk.Label(label="")
+        head.append(self.timer_label)
+        head.append(Gtk.Box(hexpand=True))
+        stats = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        self.viewers_label = Gtk.Label(label="", xalign=1)
         self.viewers_label.add_css_class("viewers-label")
-        box.append(self.viewers_label)
-        self.live_title = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
-        self.live_title.add_css_class("title-3")
+        self.likes_label = Gtk.Label(label="", xalign=1)
+        self.likes_label.add_css_class("viewers-label")
+        stats.append(self.viewers_label)
+        stats.append(self.likes_label)
+        head.append(stats)
+        box.append(head)
+        self.live_title = Gtk.Label(wrap=True, xalign=0)
+        self.live_title.add_css_class("heading")
         box.append(self.live_title)
 
+        # tabs: Chat | Stream
+        self.live_tabs = Adw.ViewStack(vexpand=True)
+        switcher = Adw.InlineViewSwitcher(stack=self.live_tabs) if hasattr(Adw, "InlineViewSwitcher") \
+            else Adw.ViewSwitcher(stack=self.live_tabs, policy=Adw.ViewSwitcherPolicy.WIDE)
+        switcher.set_halign(Gtk.Align.CENTER)
+        box.append(switcher)
+
+        # --- chat tab
+        chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.chat_scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+        self.chat_scroller.add_css_class("card")
+        self.chat_scroller.add_css_class("chat-card")
+        self.chat_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.chat_list.add_css_class("chat-list")
+        self.chat_placeholder = Gtk.Label(label=_("Comments will show up here"), margin_top=40)
+        self.chat_placeholder.add_css_class("dim-label")
+        self.chat_list.set_placeholder(self.chat_placeholder)
+        self.chat_scroller.set_child(self.chat_list)
+        chat_box.append(self.chat_scroller)
+        opts = Gtk.Box(spacing=6)
+        self.tts_toggle = Gtk.ToggleButton(tooltip_text=_("Read the chat aloud"))
+        tcontent = Adw.ButtonContent(icon_name="audio-speakers-symbolic", label=_("Read aloud"))
+        self.tts_toggle.set_child(tcontent)
+        self.tts_toggle_content = tcontent
+        self.tts_toggle.add_css_class("flat")
+        self._tts_toggle_handler = self.tts_toggle.connect("toggled", self._on_tts_toggled)
+        opts.append(self.tts_toggle)
+        self.tts_menu = Gtk.MenuButton(icon_name="pan-down-symbolic", tooltip_text=_("Voice settings"),
+                                       popover=self._build_tts_popover())
+        self.tts_menu.add_css_class("flat")
+        opts.append(self.tts_menu)
+        opts.append(Gtk.Box(hexpand=True))
+        self.show_joins = Gtk.CheckButton(label=_("Show who joins"), active=False)
+        opts.append(self.show_joins)
+        chat_box.append(opts)
+        page = self.live_tabs.add_titled(chat_box, "chat", _("Chat"))
+        page.set_icon_name("chat-message-new-symbolic")
+
+        # --- stream tab
+        stream = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         st = Adw.PreferencesGroup()
         self.hb_row = Adw.ActionRow(title=_("Heartbeat"))
         self.hb_icon = Gtk.Image()
@@ -478,7 +532,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.obs_live_icon = Gtk.Image()
         self.obs_live_row.add_prefix(self.obs_live_icon)
         st.add(self.obs_live_row)
-        box.append(st)
+        stream.append(st)
 
         self.keys_group = Adw.PreferencesGroup(title=_("Stream settings"),
                                                description=_("Paste these in OBS › Settings › Stream › Custom"))
@@ -499,17 +553,246 @@ class MainWindow(Adw.ApplicationWindow):
         self.key_row.add_suffix(self.key_show)
         self.key_row.add_suffix(kb)
         self.keys_group.add(self.key_row)
-        box.append(self.keys_group)
+        stream.append(self.keys_group)
+        sscroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+        sscroll.set_child(stream)
+        page = self.live_tabs.add_titled(sscroll, "stream", _("Stream"))
+        page.set_icon_name("network-transmit-receive-symbolic")
+        box.append(self.live_tabs)
 
-        self.end_btn = Gtk.Button(label=_("End LIVE"), halign=Gtk.Align.CENTER)
+        clamp.set_child(box)
+        outer.append(clamp)
+        bottom = Gtk.Box(halign=Gtk.Align.CENTER, margin_bottom=18)
+        self.end_btn = Gtk.Button(label=_("End LIVE"))
         self.end_btn.add_css_class("pill")
         self.end_btn.add_css_class("end-button")
         self.end_btn.connect("clicked", lambda *_: self.confirm_end())
-        box.append(self.end_btn)
+        bottom.append(self.end_btn)
+        outer.append(bottom)
+        return outer
 
-        clamp.set_child(box)
-        scroller.set_child(clamp)
-        return scroller
+    # ------------------------------------------------------------------ chat
+    CHAT_MAX_ROWS = 400
+    GIFT_STREAK_TIMEOUT = 5  # seconds without updates before a combo counts as finished
+
+    def _chat_clear(self):
+        while (row := self.chat_list.get_row_at_index(0)) is not None:
+            self.chat_list.remove(row)
+        for _lbl, _n, tid in getattr(self, "_gift_rows", {}).values():
+            if tid:
+                GLib.source_remove(tid)
+        self._gift_rows = {}
+        self._chat_rows = 0
+        self._likes_total = 0
+        self._diamonds = 0
+        self._render_stats()
+
+    def _render_stats(self):
+        parts = []
+        if self._likes_total:
+            parts.append(f"❤️ {fmt_int(self._likes_total)}")
+        if self._diamonds:
+            parts.append(f"💎 {fmt_int(self._diamonds)}")
+        self.likes_label.set_label("  ".join(parts))
+
+    def _chat_row(self, markup, css=None):
+        adj = self.chat_scroller.get_vadjustment()
+        at_bottom = adj.get_value() >= adj.get_upper() - adj.get_page_size() - 48
+        lbl = Gtk.Label(xalign=0, wrap=True, selectable=True, use_markup=True)
+        lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        lbl.set_markup(markup)
+        lbl.add_css_class("chat-line")
+        if css:
+            lbl.add_css_class(css)
+        self.chat_list.append(lbl)
+        self._chat_rows += 1
+        if self._chat_rows > self.CHAT_MAX_ROWS:
+            first = self.chat_list.get_row_at_index(0)
+            if first:
+                self.chat_list.remove(first)
+                self._chat_rows -= 1
+        if at_bottom:
+            GLib.idle_add(lambda: (adj.set_value(adj.get_upper() - adj.get_page_size()), False)[1])
+        return lbl
+
+    @staticmethod
+    def _gift_markup(e):
+        who = GLib.markup_escape_text(e.nickname or e.username or "?")
+        n = f" <b>×{e.count}</b>" if e.count > 1 else ""
+        return "🎁 " + _("{who} sent {gift}", who=f"<b>{who}</b>", gift=GLib.markup_escape_text(e.gift)) + n
+
+    def _on_gift(self, e):
+        entry = self._gift_rows.get(e.streak_key)
+        if entry:
+            lbl, _n, tid = entry
+            if tid:
+                GLib.source_remove(tid)
+            lbl.set_markup(self._gift_markup(e))
+        else:
+            lbl = self._chat_row(self._gift_markup(e), "chat-gift")
+        if e.streaking:
+            tid = GLib.timeout_add_seconds(self.GIFT_STREAK_TIMEOUT, self._finish_gift, e.streak_key)
+            self._gift_rows[e.streak_key] = (lbl, e, tid)
+        else:
+            self._gift_rows[e.streak_key] = (lbl, e, 0)
+            self._finish_gift(e.streak_key)
+
+    def _finish_gift(self, key):
+        entry = self._gift_rows.pop(key, None)
+        if entry:
+            _lbl, e, _tid = entry
+            self._diamonds += e.diamonds * e.count
+            self._render_stats()
+            if self._tts_wants("gifts"):
+                self.speaker.say(_("{who} sent {n} {gift}", who=tts.clean_name(e.nickname, e.username),
+                                   n=e.count, gift=e.gift))
+        return False
+
+    def _on_chat_events(self, events):
+        if not self.session:
+            return
+        esc = GLib.markup_escape_text
+        for e in events:
+            who = esc(e.nickname or e.username or "?")
+            name = tts.clean_name(e.nickname, e.username)
+            if e.kind == "chat":
+                self._chat_row(f"<b>{who}</b>  {esc(e.text)}")
+                if self._tts_wants("comments") and tts.clean(e.text):
+                    self.speaker.say(_("{who} says: {text}", who=name, text=e.text))
+            elif e.kind == "gift":
+                self._on_gift(e)
+            elif e.kind == "follow":
+                self._chat_row("➕ " + _("{who} followed you", who=f"<b>{who}</b>"), "chat-event")
+                if self._tts_wants("follows"):
+                    self.speaker.say(_("{who} followed you", who=name))
+            elif e.kind == "share":
+                self._chat_row("↗ " + _("{who} shared the LIVE", who=f"<b>{who}</b>"), "chat-event")
+            elif e.kind == "join":
+                if self.show_joins.get_active():
+                    self._chat_row("👋 " + _("{who} joined", who=who), "chat-join")
+            elif e.kind == "like":
+                self._likes_total = max(self._likes_total + e.count, e.total)
+                self._render_stats()
+
+    def _on_chat_error(self, err):
+        if self.session:
+            self._chat_row(GLib.markup_escape_text(_("Chat unavailable: {err}", err=_(str(err.args[0]) if err.args else str(err)))),
+                           "chat-join")
+
+    # ------------------------------------------------------------------ text to speech
+    def _tts_settings(self):
+        d = {"enabled": False, "comments": True, "gifts": True, "follows": True, "rate": 1.0}
+        d.update(self.client.state.get("tts") or {})
+        return d
+
+    def _tts_save(self, **kw):
+        d = self._tts_settings()
+        d.update(kw)
+        self.client.state.update(tts=d)
+
+    def _tts_wants(self, what):
+        st = self._tts_settings()
+        return st["enabled"] and st.get(what, True) and self.speaker.engine is not None
+
+    def _build_tts_popover(self):
+        st = self._tts_settings()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=8, margin_bottom=8,
+                      margin_start=8, margin_end=8)
+        title = Gtk.Label(label=_("Read aloud"), xalign=0)
+        title.add_css_class("heading")
+        box.append(title)
+        for key, label in (("comments", _("Comments")), ("gifts", _("Gifts")), ("follows", _("New followers"))):
+            cb = Gtk.CheckButton(label=label, active=st.get(key, True))
+            cb.connect("toggled", lambda b, k=key: self._tts_save(**{k: b.get_active()}))
+            box.append(cb)
+        box.append(Gtk.Label(label=_("Speed"), xalign=0, margin_top=6))
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.6, 1.8, 0.1)
+        scale.set_value(st.get("rate", 1.0))
+        scale.set_size_request(200, -1)
+        scale.connect("value-changed", lambda sc: (self._tts_save(rate=round(sc.get_value(), 1)),
+                                                   setattr(self.speaker, "rate", sc.get_value())))
+        box.append(scale)
+        row = Gtk.Box(spacing=6, margin_top=6)
+        skip = Gtk.Button(label=_("Skip"), tooltip_text=_("Stop reading and clear the queue"))
+        skip.connect("clicked", lambda *_: self.speaker.skip())
+        row.append(skip)
+        test = Gtk.Button(label=_("Test"))
+        test.connect("clicked", lambda *_: self._tts_test())
+        row.append(test)
+        box.append(row)
+        self.tts_engine_label = Gtk.Label(xalign=0, wrap=True, margin_top=6)
+        self.tts_engine_label.add_css_class("dim-label")
+        self.tts_engine_label.add_css_class("caption")
+        box.append(self.tts_engine_label)
+        self.tts_download_btn = Gtk.Button(label=_("Download natural voice"))
+        self.tts_download_btn.connect("clicked", lambda *_: self._tts_confirm_download())
+        box.append(self.tts_download_btn)
+        pop = Gtk.Popover(child=box)
+        pop.connect("show", lambda *_: self._render_tts_engine())
+        return pop
+
+    def _render_tts_engine(self):
+        eng = self.speaker.refresh_engine()
+        names = {"piper": _("Natural voice (Piper)"), "spd-say": "Speech Dispatcher",
+                 "espeak-ng": "eSpeak NG", "espeak": "eSpeak", None: _("No voice installed")}
+        self.tts_engine_label.set_label(_("Voice: {name}", name=names.get(eng, eng)))
+        self.tts_download_btn.set_visible(eng != "piper" and not getattr(self, "_tts_downloading", False))
+
+    def _set_tts_toggle(self, active):
+        self.tts_toggle.handler_block(self._tts_toggle_handler)
+        self.tts_toggle.set_active(active)
+        self.tts_toggle.handler_unblock(self._tts_toggle_handler)
+
+    def _on_tts_toggled(self, btn):
+        on = btn.get_active()
+        if on and not self.speaker.refresh_engine():
+            self._set_tts_toggle(False)
+            self._tts_confirm_download(enable_after=True)
+            return
+        self._tts_save(enabled=on)
+        if not on:
+            self.speaker.skip()
+
+    def _tts_test(self):
+        if not self.speaker.refresh_engine():
+            return self._tts_confirm_download()
+        self.speaker.say(_("Chat reading is on. {who} says: hello!", who="LiveBridge"))
+
+    def _tts_confirm_download(self, enable_after=False):
+        if getattr(self, "_tts_downloading", False):
+            return
+        d = Adw.AlertDialog.new(_("Download a natural voice?"),
+                                _("LiveBridge will download Piper and a voice for your language "
+                                  "(about {mb} MB) into your home folder. It works offline afterwards.",
+                                  mb=tts.PIPER_DOWNLOAD_MB))
+        d.add_response("cancel", _("Cancel"))
+        d.add_response("download", _("Download"))
+        d.set_response_appearance("download", Adw.ResponseAppearance.SUGGESTED)
+        d.set_close_response("cancel")
+        d.connect("response", lambda _d, r: r == "download" and self._tts_download(enable_after))
+        d.present(self)
+
+    def _tts_download(self, enable_after):
+        self._tts_downloading = True
+        self.tts_toggle.set_sensitive(False)
+
+        def progress(frac, _what):
+            GLib.idle_add(lambda: (self.tts_toggle_content.set_label(
+                _("Downloading… {p}%", p=int(frac * 100))), False)[1])
+
+        def done(_r, err):
+            self._tts_downloading = False
+            self.tts_toggle.set_sensitive(True)
+            self.tts_toggle_content.set_label(_("Read aloud"))
+            if err:
+                return self.error(err, heading=_("Voice download failed"))
+            self.speaker.refresh_engine()
+            self.toast(_("Natural voice ready"))
+            if enable_after:
+                self._set_tts_toggle(True)
+                self._tts_save(enabled=True)
+            self._tts_test()
+        bg(lambda: tts.install_piper(progress), done)
 
     def _render_key(self):
         if not self.session:
@@ -528,6 +811,12 @@ class MainWindow(Adw.ApplicationWindow):
         self.key_show.set_active(False)
         self._render_key()
         self.viewers_label.set_label("")
+        self._chat_clear()
+        self.live_tabs.set_visible_child_name("chat")
+        self.chat_reader = ChatReader(
+            self.client, room["id"],
+            on_events=lambda evs: GLib.idle_add(lambda: (self._on_chat_events(evs), False)[1]),
+            on_error=lambda err: GLib.idle_add(lambda: (self._on_chat_error(err), False)[1]))
         self.end_btn.set_sensitive(True)
         self.end_btn.set_label(_("End LIVE"))
         self.hb_row.set_subtitle(_("Connected to TikTok"))
@@ -544,6 +833,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._tick()
         self._timer_id = GLib.timeout_add_seconds(1, self._tick)
         self.session.start()
+        self.chat_reader.start()
 
     def _tick(self):
         if not self.session:
@@ -619,6 +909,10 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_live_ended(self, reason):
         self.session = None
+        self.speaker.skip()
+        if getattr(self, "chat_reader", None):
+            self.chat_reader.stop()
+            self.chat_reader = None
         if self._timer_id:
             GLib.source_remove(self._timer_id)
             self._timer_id = 0

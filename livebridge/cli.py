@@ -9,6 +9,9 @@ import webbrowser
 
 from . import __version__, obs, urlhandler
 from .api import ApiError, TikTokClient, split_rtmp
+from . import tts
+from .chat import ChatReader
+from .i18n import _
 from .session import LiveSession
 
 COMMANDS = ("login", "status", "start", "stop", "logout")
@@ -95,6 +98,37 @@ def cmd_start(a):
 
     s = LiveSession(cl, room, on_update=on_update, on_ended=on_ended, control_obs=control)
     s.start()
+    reader = None
+    speaker = None
+    if a.tts:
+        speaker = tts.Speaker()
+        if not speaker.engine:
+            print("No voice found. Downloading Piper + a natural voice (~%d MB)..." % tts.PIPER_DOWNLOAD_MB)
+            tts.install_piper(lambda f, w: print(f"\r  {int(f * 100)}%", end="", flush=True))
+            print()
+            speaker.refresh_engine()
+    if not a.no_chat:
+        def on_chat(events):
+            for e in events:
+                if speaker:
+                    name = tts.clean_name(e.nickname, e.username)
+                    if e.kind == "chat":
+                        speaker.say(_("{who} says: {text}", who=name, text=e.text))
+                    elif e.kind == "gift" and not e.streaking:
+                        speaker.say(_("{who} sent {n} {gift}", who=name, n=e.count, gift=e.gift))
+                    elif e.kind == "follow":
+                        speaker.say(_("{who} followed you", who=name))
+                if e.kind == "gift" and e.streaking:
+                    continue
+                who = e.nickname or e.username or "?"
+                line = {"chat": f"💬 {who}: {e.text}",
+                        "gift": f"🎁 {who} sent {e.gift}" + (f" x{e.count}" if e.count > 1 else ""),
+                        "follow": f"➕ {who} followed you", "share": f"↗ {who} shared the LIVE"}.get(e.kind)
+                if line:
+                    print(line, flush=True)
+        reader = ChatReader(cl, room["id"], on_events=on_chat,
+                            on_error=lambda e: print(f"chat unavailable: {e}", file=sys.stderr))
+        reader.start()
     print("\nYou're LIVE. Keep this running; press Ctrl+C to end the LIVE.")
     signal.signal(signal.SIGTERM, lambda *_: s.end())
     try:
@@ -102,6 +136,11 @@ def cmd_start(a):
             pass
     except KeyboardInterrupt:
         s.end()
+    finally:
+        if reader:
+            reader.stop()
+        if speaker:
+            speaker.close()
 
 
 def cmd_stop(a):
@@ -133,6 +172,8 @@ def main():
     p.add_argument("--no-comments", action="store_true")
     p.add_argument("--no-gifts", action="store_true")
     p.add_argument("--no-obs", action="store_true", help="only print server and key")
+    p.add_argument("--no-chat", action="store_true", help="don't print the live chat")
+    p.add_argument("--tts", action="store_true", help="read comments, gifts and follows aloud")
     p.set_defaults(fn=cmd_start)
     sp.add_parser("stop", help="end the open LIVE").set_defaults(fn=cmd_stop)
     sp.add_parser("logout", help="forget the TikTok session").set_defaults(fn=cmd_logout)
